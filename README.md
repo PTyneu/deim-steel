@@ -3,7 +3,8 @@
 DEIMv2 (upstream `Intellindust-AI-Lab/DEIMv2`, коммит `1d2ca42`) для детекции дефектов стали. Здесь один
 конфиг на весь эксперимент, загрузка всех весов одной командой и исправления для Windows, RTX 50xx и
 прямоугольного входа. Описание самого DEIMv2 — в [README_DEIMv2.md](README_DEIMv2.md). Лицензия DEIMv2
-допускает только некоммерческое использование.
+([LICENSE.md](LICENSE.md)) допускает только некоммерческое использование. Веса DINOv3, включая backbone
+внутри чекпоинта DEIMv2, распространяются по [LICENSE_DINOv3.md](LICENSE_DINOv3.md).
 
 ## Установка
 
@@ -17,6 +18,17 @@ uv sync          # .venv по pyproject.toml и uv.lock: torch 2.7.1 со сбо
 `requirements.txt` с torch 2.5.1.
 
 ## 1. Веса
+
+Веса для DEIMv2-X уже лежат в репозитории через Git LFS: `weights/deimv2_dinov3_x_coco.pth` (196 МБ) и
+`ckpts/dinov3_vits16plus_pretrain_lvd1689m-4057cbaa.pth` (110 МБ). Чтобы получить сами файлы, а не указатели:
+
+```bash
+git lfs install      # один раз; git-lfs: apt install git-lfs / conda install -c conda-forge git-lfs
+git lfs pull         # или сразу: git lfs clone https://github.com/PTyneu/deim-steel
+```
+
+Скрипт загрузки тоже распознаёт указатели LFS и сначала сам вызывает `git lfs pull`. Для остальных размеров
+и при недоступном LFS веса скачиваются из сети:
 
 ```bash
 bash scripts/download_weights.sh             # веса для модели из experiment.yml

@@ -4,6 +4,8 @@ Download every weight file an experiment needs.
     python tools/steel/download_weights.py [s|m|l|x|all ...] [--source auto|gdrive|hf] [--no-backbone] [--no-detector]
 
 Without a model argument the model of experiment.yml is used (x if there is no experiment.yml).
+The DEIMv2-X files are also stored in this repo with Git LFS: an LFS pointer in place of a file is fetched with
+`git lfs pull` first, then the network sources below are tried.
   detector  weights/deimv2_dinov3_<m>_coco.pth   DEIMv2 COCO checkpoint - the fine-tuning start point (train.py -t)
             sources: Google Drive (authors' model zoo) or Hugging Face (Intellindust/DEIMv2_DINOv3_<M>_COCO, same
             tensors; the two fixed decoder buffers the Hub file lacks are filled from the model config).
@@ -20,6 +22,8 @@ HTTPS_PROXY / HTTP_PROXY; or copy the files from another machine into weights/ a
 """
 
 import argparse
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -42,11 +46,33 @@ NETWORK_HELP = ("the source may be blocked on this network. Options: --source hf
                 "that has it, e.g. scp weights/{name} user@host:<repo>/weights/")
 
 
+def is_lfs_pointer(path):
+    with open(path, "rb") as f:
+        return f.read(64).startswith(b"version https://git-lfs")
+
+
 def exists(path):
-    if path.exists() and path.stat().st_size > 0:
-        print(f"ok (exists)  {path}")
-        return True
-    return False
+    if not (path.exists() and path.stat().st_size > 0):
+        return False
+    if is_lfs_pointer(path):  # repo cloned without git-lfs content
+        rel = path.relative_to(REPO).as_posix()
+        print(f"{rel} is a Git LFS pointer -> git lfs pull --include {rel}")
+        r = subprocess.run(["git", "lfs", "pull", "--include", rel], cwd=REPO)
+        if r.returncode != 0 or is_lfs_pointer(path):
+            print("git lfs pull failed (git-lfs missing or the LFS host unreachable); trying the other sources")
+            return False
+    print(f"ok (exists)  {path}")
+    return True
+
+
+def replace_from_tmp(fetch, out):
+    """Download into <out>.tmp and move it over <out> only on success (keeps a tracked LFS pointer otherwise)."""
+    tmp = out.with_name(out.name + ".tmp")
+    try:
+        fetch(tmp)
+        os.replace(tmp, out)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def gdrive(file_id, out):
@@ -91,12 +117,12 @@ def detector(m, source):
     for src in (["gdrive", "hf"] if source == "auto" else [source]):
         try:
             print(f"downloading DEIMv2-{m.upper()} COCO checkpoint from {src} ...")
-            gdrive(DETECTOR_GDRIVE[m], out) if src == "gdrive" else hf_detector(m, out)
+            fetch = (lambda p: gdrive(DETECTOR_GDRIVE[m], p)) if src == "gdrive" else (lambda p: hf_detector(m, p))
+            replace_from_tmp(fetch, out)
             check_detector(out)
             return
         except Exception as e:  # network errors, quota, blocked host
             errors.append(f"  {src}: {type(e).__name__}: {str(e)[:300]}")
-            out.unlink(missing_ok=True)
             print(f"{src} failed: {type(e).__name__}", flush=True)
     sys.exit("could not download the detector checkpoint:\n" + "\n".join(errors) + "\n"
              + NETWORK_HELP.format(name=out.name))
@@ -125,7 +151,7 @@ def dinov3_backbone(file_name, arch):
     diff = (a - b).abs().max().item()
     assert diff < 1e-4, f"conversion check failed (max diff {diff})"
     out.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(sd, out)
+    replace_from_tmp(lambda p: torch.save(sd, p), out)
     print(f"ok           {out} (converted from timm {TIMM_NAMES[arch]}, max diff {diff:.1e})")
 
 
@@ -134,7 +160,7 @@ def backbone(m):
         if m in BACKBONE_GDRIVE:
             name, fid = BACKBONE_GDRIVE[m]
             if not exists(REPO / "ckpts" / name):
-                gdrive(fid, REPO / "ckpts" / name)
+                replace_from_tmp(lambda p: gdrive(fid, p), REPO / "ckpts" / name)
                 print(f"ok           {REPO / 'ckpts' / name}")
         else:
             dinov3_backbone(*BACKBONE_DINOV3[m])

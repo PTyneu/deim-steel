@@ -223,6 +223,9 @@ def main():
     model = exp.get("model", "x")
     if weights is not None and not Path(weights).exists():
         sys.exit(f"weights not found: {weights}\nrun: bash scripts/download_weights.sh {model}")
+    if weights is not None and Path(weights).read_bytes()[:64].startswith(b"version https://git-lfs"):
+        sys.exit(f"{weights} is a Git LFS pointer, not the weights.\n"
+                 "run: git lfs install && git lfs pull   (or: bash scripts/download_weights.sh)")
     backbone = cfg["DINOv3STAs"]["weights_path"]
     if backbone and not Path(backbone).exists():  # DEIMv2 would silently start the backbone from scratch
         sys.exit(f"backbone weights not found: {backbone}\nrun: bash scripts/download_weights.sh {model} --backbone")

@@ -1,6 +1,6 @@
 # Ignored Files
 outputs/
-ckpts/
+ckpts/*
 testenv/
 backup
 
@@ -144,7 +144,10 @@ dmypy.json
 .DS_Store
 
 # deim-steel
-weights/
+weights/*
+# DEIMv2-X weights ship with the repo via Git LFS (.gitattributes)
+!weights/deimv2_dinov3_x_coco.pth
+!ckpts/dinov3_vits16plus_pretrain_lvd1689m-4057cbaa.pth
 data_cache/
 configs/_generated/
 .venv/
