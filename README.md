@@ -22,16 +22,22 @@ uv sync          # .venv по pyproject.toml и uv.lock: torch 2.7.1 со сбо
 bash scripts/download_weights.sh             # веса для модели из experiment.yml
 bash scripts/download_weights.sh x           # конкретный размер: s | m | l | x | all
 bash scripts/download_weights.sh x --no-backbone
+bash scripts/download_weights.sh x --source hf   # только Hugging Face (если Google Drive недоступен)
 ```
 
 | Что | Куда | Откуда |
 |---|---|---|
-| Чекпоинт DEIMv2, обученный на COCO (стартовая точка дообучения) | `weights/deimv2_dinov3_<m>_coco.pth` | Google Drive авторов DEIMv2 |
+| Чекпоинт DEIMv2, обученный на COCO (стартовая точка дообучения) | `weights/deimv2_dinov3_<m>_coco.pth` | Google Drive авторов DEIMv2; при ошибке автоматически Hugging Face (`Intellindust/DEIMv2_DINOv3_<M>_COCO`, те же веса бит в бит) |
 | Backbone для S и M: ViT-Tiny, дистиллированный из DINOv3 | `ckpts/vitt_distill.pt`, `ckpts/vittplus_distill.pt` | Google Drive авторов DEIMv2 |
 | Backbone для L и X: DINOv3 ViT-S16 и ViT-S16+ | `ckpts/dinov3_vits16*_pretrain_lvd1689m-*.pth` | веса timm на Hugging Face без заявки у Meta; конвертируются в официальный формат с проверкой, выход совпадает с timm бит в бит |
 
 Backbone нужен только для обучения с нуля (`weights: none`) или по upstream-конфигам. При дообучении с
 COCO-чекпоинта все веса берутся из него.
+
+Если сеть ограничена (сервер без доступа к Google или Hugging Face):
+- **зеркало Hugging Face:** `HF_ENDPOINT=https://hf-mirror.com bash scripts/download_weights.sh x --source hf`;
+- **прокси:** `HTTPS_PROXY=http://proxy:port bash scripts/download_weights.sh`;
+- **копия с другой машины:** `scp weights/*.pth user@server:<repo>/weights/` и `scp ckpts/*.pth user@server:<repo>/ckpts/`. Уже лежащие файлы скрипт не перекачивает.
 
 ## 2. Конфигурация: только `experiment.yml`
 

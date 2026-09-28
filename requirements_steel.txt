@@ -13,4 +13,5 @@ pillow
 matplotlib
 gdown
 huggingface_hub
+safetensors
 timm>=1.0.30

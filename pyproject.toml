@@ -18,6 +18,7 @@ dependencies = [
     "matplotlib",
     "gdown",               # DEIMv2 checkpoints / ViT-Tiny backbones from Google Drive
     "huggingface-hub",
+    "safetensors",         # DEIMv2 checkpoints from the Hugging Face Hub (--source hf)
     "timm>=1.0.30",        # DINOv3 ViT-S / ViT-S+ backbones (converted by tools/steel/download_weights.py)
 ]
 
