@@ -1,0 +1,40 @@
+# The only file to edit. Then:  bash train.sh   (or: python tools/steel/prepare_experiment.py experiment.yml --train)
+# Relative paths are relative to this file. Values reproduce the DEIMv2-X 800x128 SGD run of the steel study.
+
+name: deimv2_x_800x128_sgd          # run folder: <output_root>/<name>/
+model: x                            # s | m | l | x   (DEIMv2 with DINOv3-based backbones)
+weights: auto                       # auto = weights/deimv2_dinov3_<model>_coco.pth (bash scripts/download_weights.sh)
+                                    # or a path to a DEIMv2 checkpoint / an earlier best.pth;
+                                    # none = start from the backbone only (ckpts/, needs --backbone download)
+output_root: outputs                # results: outputs/<name>/best.pth, metrics.csv, metrics.png, log.txt, train.log
+
+data:
+  format: csv                       # csv | coco
+  # csv: ImageId, ClassId, x_min, y_min, x_max, y_max, split(train|val); converted once to data_cache/<name>/
+  csv: ../steel-defect-detection/train_bboxes.csv
+  images: ../steel-defect-detection/train_images
+  class_merge: {6: 1, 5: 3}         # old ClassId -> new ClassId (leave {} to keep all classes)
+  # coco: category ids are remapped to 0..K-1 automatically when needed
+  # train_images: path/to/train_images
+  # train_ann: path/to/train.json
+  # val_images: path/to/val_images
+  # val_ann: path/to/val.json
+
+input_size: [128, 800]              # [h, w], multiples of 32; 1600x256 strips -> 800x128 keeps the aspect ratio
+epochs: 12
+batch_size: 20                      # 800x128, DEIMv2-X: ~12 GB on a 16 GB card; 24 spills into system RAM on Windows
+val_batch_size: 16
+workers: 4
+
+optimizer: sgd                      # sgd | adamw
+lr: auto                            # head lr. auto: sgd 0.01, adamw = model recipe scaled to batch_size
+backbone_lr_ratio: auto             # backbone lr = lr * ratio. auto: sgd 0.02, adamw = recipe ratio (e.g. X: 0.02)
+weight_decay: auto                  # auto: sgd 1e-4, adamw = recipe (1.25e-4)
+
+mosaic: auto                        # auto: on for square input_size, off for rectangular (Mosaic is square-only)
+multiscale: false                   # square inputs only
+amp: true
+seed: 0
+
+best_metric: map50                  # map50 | map (AP50:95) - which metric selects best.pth
+save_best_only: true                # run folder keeps only best.pth (internal checkpoints are removed after training)

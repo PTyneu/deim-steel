@@ -135,3 +135,10 @@ class ConvertPILImage(T.Transform):
         inpt = Image(inpt)
 
         return inpt
+
+
+# torchvision >= 0.21 calls Transform.transform / make_params instead of _transform / _get_params
+# (this repo pins torchvision 0.20; RTX 50xx needs torch >= 2.7 / torchvision 0.22)
+for _cls in (PadToSize, ConvertBoxes, ConvertPILImage):
+    _cls.transform = _cls._transform
+PadToSize.make_params = PadToSize._get_params
