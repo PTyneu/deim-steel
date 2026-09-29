@@ -10,10 +10,13 @@ output_root: outputs                # results: outputs/<name>/best.pth, metrics.
 
 data:
   format: csv                       # csv | coco
-  # csv: ImageId, ClassId, x_min, y_min, x_max, y_max, split(train|val); converted once to data_cache/<name>/
+  # csv, one row per box: image_path (absolute), instance_label (string), bbox_x_tl, bbox_y_tl, bbox_x_br,
+  #   bbox_y_br (pixels of the original image), split (train | val | test). test is kept: evaluate.py --split test.
+  #   Empty label / bbox = image without boxes. Converted once to data_cache/<name>/ (again when the CSV changes).
+  #   The legacy steel CSV (ImageId, ClassId, x_min, ..., split) is detected by its header and needs `images`.
   csv: ../steel-defect-detection/train_bboxes.csv
-  images: ../steel-defect-detection/train_images
-  class_merge: {6: 1, 5: 3}         # old ClassId -> new ClassId (leave {} to keep all classes)
+  images: ../steel-defect-detection/train_images   # optional: only for relative image_path or the legacy CSV
+  class_merge: {6: 1, 5: 3}         # old label -> new label, e.g. {scratch_small: scratch}; {} keeps all classes
   # coco: category ids are remapped to 0..K-1 automatically when needed
   # train_images: path/to/train_images
   # train_ann: path/to/train.json
@@ -24,7 +27,9 @@ input_size: [128, 800]              # [h, w], multiples of 32; 1600x256 strips -
 epochs: 12
 batch_size: 20                      # 800x128, DEIMv2-X: ~12 GB on a 16 GB card; 24 spills into system RAM on Windows
 val_batch_size: 16
-workers: 4
+workers: 4                          # data loader processes per GPU
+devices: [0]                        # GPU ids as nvidia-smi shows them; several = DDP on this machine, e.g. [0, 1, 2, 3]
+                                    # batch_size / val_batch_size are totals over all GPUs (per GPU: batch_size / N)
 
 optimizer: sgd                      # sgd | adamw
 lr: auto                            # head lr. auto: sgd 0.01, adamw = model recipe scaled to batch_size

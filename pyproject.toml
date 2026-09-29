@@ -16,6 +16,7 @@ dependencies = [
     "transformers",
     "pillow",
     "matplotlib",
+    "pandas>=2,<3",        # tools/steel/infer.py returns a DataFrame; <3: Windows Smart App Control blocked a 3.0.6 DLL
     "gdown",               # DEIMv2 checkpoints / ViT-Tiny backbones from Google Drive
     "huggingface-hub",
     "safetensors",         # DEIMv2 checkpoints from the Hugging Face Hub (--source hf)

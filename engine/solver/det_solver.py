@@ -80,6 +80,8 @@ class DetSolver(BaseSolver):
         if best_only and dist_utils.is_main_process():
             state_dir.mkdir(parents=True, exist_ok=True)
         best_value = -1.0
+        coco = getattr(self.val_dataloader.dataset, 'coco', None)  # label i = i-th category (ids 0..K-1)
+        class_names = [c['name'] for c in coco.loadCats(sorted(coco.getCatIds()))] if coco is not None else None
 
         best_stat_print = best_stat.copy()
         start_time = time.time()
@@ -195,9 +197,11 @@ class DetSolver(BaseSolver):
                 if best_only and value > best_value:
                     best_value = value
                     module = dist_utils.de_parallel(self.ema.module if self.ema else self.model)
+                    # self-contained for tools/steel/infer.py: weights + model config + class names
                     torch.save({'model': module.state_dict(), 'epoch': epoch, 'metric': best_metric,
                                 'value': value, 'eval_spatial_size': ycfg.get('eval_spatial_size'),
-                                'num_classes': ycfg.get('num_classes')}, self.output_dir / 'best.pth')
+                                'num_classes': ycfg.get('num_classes'), 'class_names': class_names,
+                                'config': ycfg}, self.output_dir / 'best.pth')
                     print(f'best.pth updated: {best_metric}={value:.4f} (epoch {epoch})')
                 if plot_metrics and coco_evaluator is not None:
                     metrics_log.update(self.output_dir, epoch, train_stats, test_stats, coco_evaluator,

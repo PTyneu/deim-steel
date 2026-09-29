@@ -11,6 +11,7 @@ calflops
 transformers
 pillow
 matplotlib
+pandas>=2,<3
 gdown
 huggingface_hub
 safetensors

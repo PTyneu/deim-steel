@@ -3,6 +3,7 @@ Build a complete DEIMv2 training config from the single editable file (experimen
 
     python tools/steel/prepare_experiment.py experiment.yml           # -> configs/_generated/<name>.yml + command
     python tools/steel/prepare_experiment.py experiment.yml --train   # ... and run train.py with it
+                                                                     #     (several `devices`: DDP via torchrun)
 
 What is derived from experiment.yml (everything else comes from the chosen model's COCO recipe,
 configs/deimv2/deimv2_dinov3_<model>_coco.yml, which stays untouched - the upstream way of training still works):
@@ -13,6 +14,8 @@ configs/deimv2/deimv2_dinov3_<model>_coco.yml, which stays untouched - the upstr
   * the recipe's schedule (augmentation stages, flat-cosine lr, no-aug tail, matcher switch) scaled to `epochs`
   * optimizer: AdamW (recipe lr scaled linearly to the batch) or SGD (lr 0.01, backbone x0.02, Nesterov, clip 10)
   * run folder outputs/<name>/: best.pth only + metrics.csv / metrics.png / log.txt (see engine/solver/det_solver.py)
+  * devices: GPU ids; more than one -> DDP on one machine (torchrun). batch_size stays the total over all GPUs
+    (DEIM's total_batch_size), so iterations per epoch, lr and warmups do not depend on the number of GPUs
 """
 
 import argparse
@@ -47,6 +50,14 @@ def auto(v):
     return v is None or (isinstance(v, str) and v.lower() == "auto")
 
 
+def gpu_ids(v):
+    """devices: 0 | [0, 1] | "0,1" -> ['0', '1']; absent -> None (CUDA_VISIBLE_DEVICES is left as it is, one GPU)."""
+    if v is None:
+        return None
+    ids = [str(int(x)) for x in v] if isinstance(v, (list, tuple)) else [s.strip() for s in str(v).split(",")]
+    return [i for i in ids if i] or None
+
+
 def contiguous_ann(ann, cache_dir):
     """DEIMv2 (remap_mscoco_category: False) needs category ids 0..K-1; write a remapped copy otherwise."""
     d = json.loads(Path(ann).read_text())
@@ -66,25 +77,36 @@ def contiguous_ann(ann, cache_dir):
 def prepare_data(data, base, name):
     cache = REPO / "data_cache" / name
     cache.mkdir(parents=True, exist_ok=True)
+    test = None
     if data.get("format", "coco") == "csv":
         from tools.steel.csv_to_coco import convert
 
-        csv_path, images = path_of(data["csv"], base), path_of(data["images"], base)
-        merge = data.get("class_merge") or {}
-        key = hashlib.md5(f"{csv_path}|{os.path.getmtime(csv_path)}|{images}|{sorted(merge.items())}".encode())
+        csv_path = path_of(data["csv"], base)
+        images = path_of(data["images"], base) if data.get("images") else None  # legacy ImageId / relative paths
+        merge = {str(k): str(v) for k, v in (data.get("class_merge") or {}).items()}
+        key = hashlib.md5(f"v2|{csv_path}|{os.path.getmtime(csv_path)}|{images}|{sorted(merge.items())}".encode())
         stamp = cache / f"source_{key.hexdigest()[:10]}.txt"
         if not stamp.exists():
-            convert(csv_path, images, cache, merge)
+            for old in list(cache.glob("*.json")) + list(cache.glob("source_*.txt")):
+                old.unlink()  # stale splits of an earlier conversion
+            convert(csv_path, cache, images, merge)
             stamp.write_text(f"{csv_path}\n{images}\n{merge}\n")
-        train_img = val_img = images
+        root = images or csv_path.parent  # file_name is an absolute path, it wins over the folder
+        train_img = val_img = root
         train_ann, val_ann = cache / "train.json", cache / "val.json"
+        if (cache / "test.json").exists():
+            test = (root, cache / "test.json")
     else:
         train_img, val_img = path_of(data["train_images"], base), path_of(data["val_images"], base)
         train_ann, val_ann = path_of(data["train_ann"], base), path_of(data["val_ann"], base)
+        if data.get("test_ann"):
+            test = (path_of(data["test_images"], base), path_of(data["test_ann"], base))
     train_ann, k_train, n_train = contiguous_ann(train_ann, cache)
     val_ann, k_val, _ = contiguous_ann(val_ann, cache)
     assert k_train == k_val, f"train has {k_train} classes, val has {k_val}"
-    return train_img, train_ann, val_img, val_ann, k_train, n_train
+    if test:
+        test = (test[0], contiguous_ann(test[1], cache)[0])
+    return train_img, train_ann, val_img, val_ann, k_train, n_train, test
 
 
 def build(exp, base):
@@ -94,8 +116,12 @@ def build(exp, base):
     r_epochs, r_policy = recipe["epoches"], recipe["train_dataloader"]["dataset"]["transforms"]["policy"]["epoch"]
     r_batch = recipe["train_dataloader"]["total_batch_size"]
 
-    train_img, train_ann, val_img, val_ann, num_classes, n_train = prepare_data(exp["data"], base, name)
-    E, batch = int(exp.get("epochs", 12)), int(exp.get("batch_size", 16))
+    train_img, train_ann, val_img, val_ann, num_classes, n_train, test = prepare_data(exp["data"], base, name)
+    E, batch, val_batch = int(exp.get("epochs", 12)), int(exp.get("batch_size", 16)), int(exp.get("val_batch_size", 16))
+    n_gpu = len(gpu_ids(exp.get("devices")) or [0])
+    if batch % n_gpu or val_batch % n_gpu:
+        raise ValueError(f"batch_size ({batch}) and val_batch_size ({val_batch}) are totals over all GPUs: "
+                         f"make them divisible by the number of devices ({n_gpu})")
     h, w = (int(v) for v in exp.get("input_size", [640, 640]))
     assert h % 32 == 0 and w % 32 == 0, "input_size sides must be multiples of 32"
     square = h == w
@@ -193,7 +219,7 @@ def build(exp, base):
                                "base_size_repeat") if multiscale else None)},
         },
         "val_dataloader": {
-            "total_batch_size": int(exp.get("val_batch_size", 16)),
+            "total_batch_size": val_batch,
             "num_workers": int(exp.get("workers", 4)),
             "dataset": {"img_folder": Path(val_img).as_posix(), "ann_file": Path(val_ann).as_posix(),
                         "transforms": {"ops": val_ops}},
@@ -201,9 +227,12 @@ def build(exp, base):
     }
     if opt == "sgd":
         cfg["clip_max_norm"] = 10.0  # 0.1 of the AdamW recipe would stall plain SGD
+    if test:  # not used by training; tools/steel/evaluate.py --split test
+        cfg["test_images"], cfg["test_ann"] = Path(test[0]).as_posix(), Path(test[1]).as_posix()
     summary = (f"model DEIMv2-{model.upper()} | input {h}x{w} | {E} epochs, batch {batch}, {opt} lr {lr:.3g} "
                f"(backbone x{ratio:.3g}), wd {wd:.3g} | classes {num_classes}, train images {n_train} | "
-               f"aug stages {[p0, p1, p2]}, mosaic {mosaic}, multiscale {multiscale}")
+               f"aug stages {[p0, p1, p2]}, mosaic {mosaic}, multiscale {multiscale} | test split {bool(test)}"
+               + (f" | DDP on {n_gpu} GPUs, batch {batch // n_gpu} per GPU" if n_gpu > 1 else ""))
     return cfg, weights, run_dir, summary
 
 
@@ -230,18 +259,29 @@ def main():
     if backbone and not Path(backbone).exists():  # DEIMv2 would silently start the backbone from scratch
         sys.exit(f"backbone weights not found: {backbone}\nrun: bash scripts/download_weights.sh {model} --backbone")
 
-    cmd = [sys.executable, "-u", "train.py", "-c", out.relative_to(REPO).as_posix(), "--seed", str(exp.get("seed", 0))]
+    train = ["train.py", "-c", out.relative_to(REPO).as_posix(), "--seed", str(exp.get("seed", 0))]
     if exp.get("amp", True):
-        cmd.append("--use-amp")
+        train.append("--use-amp")
     if weights is not None:
-        cmd += ["-t", Path(weights).as_posix()]
+        train += ["-t", Path(weights).as_posix()]
+    ids = gpu_ids(exp.get("devices"))
+    ddp = bool(ids) and len(ids) > 1
+    if ddp:  # one process per GPU; --standalone picks a free port for the rendezvous
+        cmd = [sys.executable, "-m", "torch.distributed.run", "--standalone", f"--nproc_per_node={len(ids)}"] + train
+    else:
+        cmd = [sys.executable, "-u"] + train
+    env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
+    if ids:  # ids as nvidia-smi prints them
+        env.update(CUDA_DEVICE_ORDER="PCI_BUS_ID", CUDA_VISIBLE_DEVICES=",".join(ids))
     print(summary)
     print(f"config:  {out}")
     print(f"results: {run_dir}  (best.pth, metrics.csv, metrics.png, log.txt)")
-    print("command: " + " ".join(cmd))
+    print("command: " + (f"CUDA_VISIBLE_DEVICES={','.join(ids)} " if ids else "") + " ".join(cmd))
     if args.train:
+        if ddp and os.name == "nt":
+            sys.exit("DDP: torchrun from the Windows builds of torch cannot start its store (they lack libuv); "
+                     "train on several GPUs under Linux, or set one device")
         run_dir.mkdir(parents=True, exist_ok=True)
-        env = dict(os.environ, PYTHONIOENCODING="utf-8")
         with open(run_dir / "train.log", "a", encoding="utf-8") as log:
             proc = subprocess.Popen(cmd, cwd=REPO, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                     text=True, encoding="utf-8", errors="replace")
