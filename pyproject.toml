@@ -21,6 +21,8 @@ dependencies = [
     "huggingface-hub",
     "safetensors",         # DEIMv2 checkpoints from the Hugging Face Hub (--source hf)
     "timm>=1.0.30",        # DINOv3 ViT-S / ViT-S+ backbones (converted by tools/steel/download_weights.py)
+    "onnx",                # tools/steel/export_onnx.py
+    "onnxruntime",         # check of the export, Detector("best.onnx"); for GPU: onnxruntime-gpu instead
 ]
 
 [tool.uv]

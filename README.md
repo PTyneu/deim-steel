@@ -168,6 +168,65 @@ deploy=False)` воспроизводит валидацию точно. Эти�
 Чекпоинтам без встроенного конфига (сохранённым до этой версии или `last.pth`/`best_stg*.pth` из upstream DEIM)
 нужен конфиг обучения: `Detector(ckpt, config="configs/_generated/<name>.yml")`. Для `outputs/<name>/` он находится сам.
 
+## 6. Экспорт в ONNX
+
+```bash
+python tools/steel/export_onnx.py                      # best.pth из experiment.yml -> outputs/<name>/best.onnx
+python tools/steel/export_onnx.py path/to/best.pth --out model.onnx
+python tools/steel/export_onnx.py weights/deimv2_dinov3_x_coco.pth --config configs/deimv2/deimv2_dinov3_x_coco.yml
+```
+
+Конфиг модели и имена классов берутся из `best.pth`, поэтому экспорт совпадает с обученной моделью, даже если
+`experiment.yml` потом правили: из него берётся только путь к `outputs/<name>/best.pth`. Чекпоинтам без встроенного
+конфига (COCO-веса DEIMv2, `best.pth` старых версий) нужен `--config`. После экспорта скрипт прогоняет PyTorch и
+onnxruntime на нескольких изображениях (`--images` или первые из val) с batch 3 и 1 и сравнивает результаты.
+Если расхождение больше порога, скрипт завершается с ошибкой.
+
+| | Имя | Форма | Что это |
+|---|---|---|---|
+| вход | `images` | `float32 [N, 3, H, W]` | RGB, сжато до W×H (bilinear), /255, затем `(x - mean) / std` |
+| вход | `orig_target_sizes` | `int64 [N, 2]` | исходные (ширина, высота) |
+| выход | `labels` | `int64 [N, 300]` | номер класса, имя — `class_names[label]` |
+| выход | `boxes` | `float32 [N, 300, 4]` | x_tl, y_tl, x_br, y_br в пикселях исходного изображения |
+| выход | `scores` | `float32 [N, 300]` | уверенность 0..1 |
+
+Batch N гибкий, размер входа H×W фиксирован тем `input_size`, на котором училась модель. Sigmoid и выбор
+top-300 уже внутри графа, NMS не нужен. В метаданных файла лежат `class_names`, `input_size` и `normalize`
+(`[mean, std]`), так что ONNX-файл самодостаточен. Его можно запускать тремя способами:
+- через `Detector("best.onnx")` с тем же API: `detect` для сырых результатов, `predict` для CSV-формата;
+- без кода репозитория, только onnxruntime, numpy и PIL:
+
+```python
+import json
+import numpy as np
+import onnxruntime as ort
+from PIL import Image
+
+sess = ort.InferenceSession("best.onnx", providers=[p for p in ("CUDAExecutionProvider", "CPUExecutionProvider")
+                                                    if p in ort.get_available_providers()])
+meta = sess.get_modelmeta().custom_metadata_map
+names = json.loads(meta["class_names"])
+h, w = json.loads(meta["input_size"])
+norm = json.loads(meta["normalize"])  # [mean, std] or None
+
+def detect(path, conf=0.5):
+    img = Image.open(path).convert("RGB")
+    x = np.asarray(img.resize((w, h), Image.BILINEAR), dtype=np.float32) / 255
+    if norm:
+        x = (x - np.array(norm[0], np.float32)) / np.array(norm[1], np.float32)
+    x = x.transpose(2, 0, 1)[None]  # [1, 3, h, w]
+    size = np.array([[img.width, img.height]], dtype=np.int64)
+    labels, boxes, scores = sess.run(None, {"images": x, "orig_target_sizes": size})
+    keep = scores[0] >= conf
+    return [(names[l], float(s), [round(float(v), 1) for v in b])
+            for l, s, b in zip(labels[0][keep], scores[0][keep], boxes[0][keep])]
+
+detect("bus.jpg")   # [('bus', 0.937, [7.4, 228.9, 803.5, 730.1]), ('person', 0.918, [49.0, 396.7, 247.3, 904.6]), ...]
+```
+
+- на GPU: вместо `onnxruntime` поставить `onnxruntime-gpu`, оба пакета вместе ставить нельзя. Для TensorRT см.
+  [README_DEIMv2.md](README_DEIMv2.md).
+
 ## Старый способ
 
 Upstream-запуск работает без изменений. Новые возможности включаются только ключами, которые пишет генератор
@@ -188,7 +247,7 @@ python train.py -c configs/deimv2/deimv2_dinov3_x_coco.yml --use-amp --seed=0 -t
 | `engine/misc/dist_utils.py` | gloo, если нет NCCL; при `WORLD_SIZE > 1` ошибка инициализации DDP больше не превращается молча в N независимых обучений |
 | `engine/core/yaml_utils.py` | `load_config` без общего словаря по умолчанию: второй конфиг в том же процессе смешивался с первым |
 | `engine/misc/metrics_log.py` | `metrics.csv` и `metrics.png` по эпохам |
-| `tools/steel/*`, `scripts/download_weights.sh`, `train.sh`, `experiment.yml` | единый конфиг, запуск DDP, загрузка весов, конвертация CSV → COCO и DINOv3 из timm, оценка, инференс |
+| `tools/steel/*`, `scripts/download_weights.sh`, `train.sh`, `experiment.yml` | единый конфиг, запуск DDP, загрузка весов, конвертация CSV → COCO и DINOv3 из timm, оценка, инференс, экспорт в ONNX |
 
 ## Замечания
 

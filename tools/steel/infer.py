@@ -17,11 +17,14 @@ those rows), so the output can go straight back into csv_to_coco, e.g. as pseudo
 
 best.pth written by this repo carries the model config and class names. Older checkpoints and DEIMv2's own
 last.pth / best_stg*.pth need `config` (configs/_generated/<name>.yml; found automatically for outputs/<name>/).
+An ONNX file from tools/steel/export_onnx.py works the same way: Detector("best.onnx") runs it with onnxruntime
+(CUDA when onnxruntime-gpu is installed), reading class names and preprocessing from the file's metadata.
 """
 
 import argparse
 import contextlib
 import io
+import json
 import math
 import os
 import sys
@@ -66,13 +69,32 @@ def _config(ckpt, checkpoint, config):
     return YAMLConfig(str(config))
 
 
+class _OnnxModel:
+    """onnxruntime session called like _Deployed: (images, orig_sizes) -> (labels, boxes, scores) tensors."""
+
+    def __init__(self, path, device=None):
+        import onnxruntime as ort
+
+        cuda = device != "cpu" and "CUDAExecutionProvider" in ort.get_available_providers()
+        providers = (["CUDAExecutionProvider"] if cuda else []) + ["CPUExecutionProvider"]
+        self.session = ort.InferenceSession(str(path), providers=providers)
+        self.meta = self.session.get_modelmeta().custom_metadata_map
+
+    def __call__(self, images, orig_sizes):
+        out = self.session.run(None, {"images": images.cpu().numpy(),
+                                      "orig_target_sizes": orig_sizes.cpu().numpy().astype("int64")})
+        return [torch.from_numpy(o) for o in out]
+
+
 def _class_names(ckpt, ycfg):
     if ckpt.get("class_names"):
         return list(ckpt["class_names"])
+    if ycfg.get("remap_mscoco_category") and ycfg.get("num_classes") == 80:  # upstream COCO checkpoints
+        from engine.data.dataset.coco_dataset import mscoco_category2name, mscoco_label2category
+
+        return [mscoco_category2name[mscoco_label2category[i]] for i in range(80)]
     ann = Path(ycfg.get("val_dataloader", {}).get("dataset", {}).get("ann_file", ""))
     if ann.is_file():
-        import json
-
         cats = json.loads(ann.read_text())["categories"]
         return [c["name"] for c in sorted(cats, key=lambda c: c["id"])]
     return [f"class_{i}" for i in range(ycfg["num_classes"])]
@@ -111,27 +133,33 @@ class Detector:
     differ from the training-time validation in the 3rd-4th digit. deploy=False reproduces the validation exactly."""
 
     def __init__(self, checkpoint, config=None, device=None, deploy=True):
-        ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False)
-        cfg = _config(ckpt, checkpoint, config)
-        ycfg = cfg.yaml_cfg
-        if isinstance(ycfg.get("DINOv3STAs"), dict):
-            ycfg["DINOv3STAs"]["weights_path"] = None  # every weight comes from the checkpoint
-        if isinstance(ycfg.get("HGNetv2"), dict):
-            ycfg["HGNetv2"]["pretrained"] = False
-        with contextlib.redirect_stdout(io.StringIO()):  # build-time prints ("Training DINOv3 from scratch...")
-            cfg.model.load_state_dict(ckpt["ema"]["module"] if "ema" in ckpt else ckpt["model"])
-            model = _Deployed(cfg, deploy)
-        self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
-        self.model = model.to(self.device).eval()
-        self.class_names = _class_names(ckpt, ycfg)
-
-        # the val transforms of the training config: Resize to the input size, [0, 1], optional Normalize
-        ops = ycfg["val_dataloader"]["dataset"]["transforms"]["ops"]
-        size = next((op["size"] for op in ops if op["type"] == "Resize"), ycfg["eval_spatial_size"])
-        tf = [T.Resize(tuple(size)), T.ToTensor()]
-        tf += [T.Normalize(op["mean"], op["std"]) for op in ops if op["type"] == "Normalize"]
-        self.transform = T.Compose(tf)
+        if Path(checkpoint).suffix.lower() == ".onnx":  # written by tools/steel/export_onnx.py
+            self.model, self.config = _OnnxModel(checkpoint, device), None
+            self.device = torch.device("cpu")  # inputs go to onnxruntime as numpy arrays
+            meta = self.model.meta
+            self.class_names = json.loads(meta["class_names"])
+            size, norm = json.loads(meta["input_size"]), json.loads(meta["normalize"])
+        else:
+            ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False)
+            cfg = _config(ckpt, checkpoint, config)
+            ycfg = self.config = cfg.yaml_cfg
+            if isinstance(ycfg.get("DINOv3STAs"), dict):
+                ycfg["DINOv3STAs"]["weights_path"] = None  # every weight comes from the checkpoint
+            if isinstance(ycfg.get("HGNetv2"), dict):
+                ycfg["HGNetv2"]["pretrained"] = False
+            with contextlib.redirect_stdout(io.StringIO()):  # build-time prints ("Training DINOv3 from scratch...")
+                cfg.model.load_state_dict(ckpt["ema"]["module"] if "ema" in ckpt else ckpt["model"])
+                model = _Deployed(cfg, deploy)
+            self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+            self.model = model.to(self.device).eval()
+            self.class_names = _class_names(ckpt, ycfg)
+            # the val transforms of the training config: Resize to the input size, [0, 1], optional Normalize
+            ops = ycfg["val_dataloader"]["dataset"]["transforms"]["ops"]
+            size = next((op["size"] for op in ops if op["type"] == "Resize"), ycfg["eval_spatial_size"])
+            norm = next(([op["mean"], op["std"]] for op in ops if op["type"] == "Normalize"), None)
         self.input_size = tuple(size)  # (h, w)
+        self.normalize = norm  # [mean, std] or None
+        self.transform = T.Compose([T.Resize(self.input_size), T.ToTensor()] + ([T.Normalize(*norm)] if norm else []))
 
     @torch.no_grad()
     def detect(self, paths, conf=0.0, batch_size=16, workers=4):
